@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -107,8 +108,7 @@ class OrderStates(StatesGroup):
 
 
 # ================= ХРАНИЛИЩЕ =================
-user_carts = {}       # user_id -> list of items
-temp_order = {}       # user_id -> dict текущего заказа
+user_carts = {}   # user_id -> list of items
 
 
 def load_json(path, default):
@@ -196,7 +196,7 @@ def cord_menu():
         [InlineKeyboardButton(text="🧶 Средний — +50₽", callback_data="cord_medium")],
         [InlineKeyboardButton(text="🪢 Большой — +70₽", callback_data="cord_big")],
         [InlineKeyboardButton(text="🚫 Без паракорда", callback_data="cord_no")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="order")],
     ])
 
 
@@ -204,20 +204,20 @@ def beads_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📿 С бусинами — +40₽", callback_data="beads_yes")],
         [InlineKeyboardButton(text="🚫 Без бусин", callback_data="beads_no")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="order")],
     ])
 
 
-def cart_actions_menu():
+def cart_actions_menu(idx):
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Удалить", callback_data=f"cart_del_{idx}")],
         [InlineKeyboardButton(text="🗑 Очистить корзину", callback_data="cart_clear")],
-        [InlineKeyboardButton(text="✅ Оформить заказ", callback_data="cart_checkout")],
-        [InlineKeyboardButton(text="➕ Добавить ещё", callback_data="order")],
+        [InlineKeyboardButton(text="✅ Оформить всё", callback_data="cart_checkout")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
     ])
 
 
-def cart_empty_menu():
+def cart_menu_empty():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Добавить товар", callback_data="order")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
@@ -301,13 +301,11 @@ async def set_commands():
     await bot.set_my_commands(commands)
 
 
-# ---------- СТАРТ ----------
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     register_user(message.from_user)
     user_carts.pop(message.from_user.id, None)
-    temp_order.pop(message.from_user.id, None)
     await message.answer(WELCOME_TEXT, reply_markup=main_menu())
 
 
@@ -320,8 +318,7 @@ async def cmd_menu(message: Message, state: FSMContext):
 @dp.message(Command("cart"))
 async def cmd_cart(message: Message):
     cart = user_carts.get(message.from_user.id, [])
-    kb = cart_empty_menu() if not cart else cart_actions_menu()
-    await message.answer(format_cart(cart), reply_markup=kb)
+    await message.answer(format_cart(cart), reply_markup=cart_menu_empty() if not cart else cart_actions_menu(0))
 
 
 @dp.message(Command("help"))
@@ -417,16 +414,27 @@ async def cb_profile(call: CallbackQuery):
 @dp.callback_query(F.data == "cart")
 async def cb_cart(call: CallbackQuery):
     cart = user_carts.get(call.from_user.id, [])
-    kb = cart_empty_menu() if not cart else cart_actions_menu()
+    kb = cart_menu_empty() if not cart else cart_actions_menu(0)
     await call.message.edit_text(format_cart(cart), reply_markup=kb)
     await call.answer()
+
+
+@dp.callback_query(F.data.startswith("cart_del_"))
+async def cb_cart_del(call: CallbackQuery):
+    idx = int(call.data.split("_")[-1])
+    cart = user_carts.get(call.from_user.id, [])
+    if 0 <= idx < len(cart):
+        removed = cart.pop(idx)
+        await call.answer(f"❌ Удалено: {SIZE_NAMES[removed['size']]}")
+    kb = cart_menu_empty() if not cart else cart_actions_menu(0)
+    await call.message.edit_text(format_cart(cart), reply_markup=kb)
 
 
 @dp.callback_query(F.data == "cart_clear")
 async def cb_cart_clear(call: CallbackQuery):
     user_carts.pop(call.from_user.id, None)
-    await call.message.edit_text(format_cart([]), reply_markup=cart_empty_menu())
-    await call.answer("🗑 Корзина очищена", show_alert=True)
+    await call.message.edit_text(format_cart([]), reply_markup=cart_menu_empty())
+    await call.answer("🗑 Корзина очищена")
 
 
 @dp.callback_query(F.data == "cart_checkout")
@@ -456,7 +464,7 @@ async def cb_add_comment(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(
         "📝 <b>Напишите комментарий к заказу</b>\n\n"
         "Например: цвета, пожелания, особенности.\n\n"
-        "Отправьте сообщение или нажмите кнопку ниже:",
+        "Отправьте сообщение или /skip:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⏭ Пропустить", callback_data="confirm_order")]
         ])
@@ -466,6 +474,10 @@ async def cb_add_comment(call: CallbackQuery, state: FSMContext):
 
 @dp.message(OrderStates.waiting_comment)
 async def process_comment(message: Message, state: FSMContext):
+    if message.text == "/skip":
+        await state.clear()
+        await message.answer("⏭ Комментарий пропущен")
+        return
     await state.update_data(comment=message.text)
     await state.clear()
     await message.answer(
@@ -564,7 +576,11 @@ async def cb_order(call: CallbackQuery):
 @dp.callback_query(F.data.in_({"size_small", "size_big"}))
 async def cb_size(call: CallbackQuery):
     size = "small" if call.data == "size_small" else "big"
-    temp_order.setdefault(call.from_user.id, {})["size"] = size
+    # временное хранилище
+    user_carts.setdefault(call.from_user.id, [])
+    # сохраним "текущий" товар в отдельный dict
+    current = user_carts.setdefault(f"_tmp_{call.from_user.id}", {})
+    current["size"] = size
 
     text = (
         "🛒 <b>Оформление заказа</b>\n\n"
@@ -580,20 +596,19 @@ async def cb_size(call: CallbackQuery):
 @dp.callback_query(F.data.in_({"cord_small", "cord_medium", "cord_big", "cord_no"}))
 async def cb_cord(call: CallbackQuery):
     cord_map = {
-        "cord_small": "small",
-        "cord_medium": "medium",
-        "cord_big": "big",
-        "cord_no": None,
+        "cord_small": ("small", 30),
+        "cord_medium": ("medium", 50),
+        "cord_big": ("big", 70),
+        "cord_no": (None, 0),
     }
-    cord_key = cord_map[call.data]
-    temp_order.setdefault(call.from_user.id, {})["cord"] = cord_key
-
-    size = temp_order.get(call.from_user.id, {}).get("size", "small")
+    cord_key, _ = cord_map[call.data]
+    current = user_carts.setdefault(f"_tmp_{call.from_user.id}", {})
+    current["cord"] = cord_key
 
     text = (
         "🛒 <b>Оформление заказа</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Размер: <b>{SIZE_NAMES[size]}</b>\n"
+        f"✅ Размер: <b>{SIZE_NAMES[current.get('size', 'small')]}</b>\n"
         f"✅ Паракорд: <b>{CORD_NAMES[cord_key]}</b>\n"
         "📦 <b>Шаг 3:</b> Добавить бусины?\n"
         "━━━━━━━━━━━━━━━━━━━━"
@@ -605,7 +620,7 @@ async def cb_cord(call: CallbackQuery):
 @dp.callback_query(F.data.in_({"beads_yes", "beads_no"}))
 async def cb_beads(call: CallbackQuery):
     beads = call.data == "beads_yes"
-    current = temp_order.get(call.from_user.id, {})
+    current = user_carts.get(f"_tmp_{call.from_user.id}", {})
 
     if "size" not in current or "cord" not in current:
         await call.answer("⚠️ Начните заново", show_alert=True)
@@ -618,7 +633,7 @@ async def cb_beads(call: CallbackQuery):
 
     item = {"size": size, "cord": cord, "beads": beads, "total": total}
     user_carts.setdefault(call.from_user.id, []).append(item)
-    temp_order.pop(call.from_user.id, None)
+    user_carts.pop(f"_tmp_{call.from_user.id}", None)
 
     cart = user_carts.get(call.from_user.id, [])
 
@@ -732,7 +747,7 @@ async def cb_photos(call: CallbackQuery):
 @dp.callback_query(F.data == "back")
 async def cb_back(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    temp_order.pop(call.from_user.id, None)
+    user_carts.pop(f"_tmp_{call.from_user.id}", None)
     await call.message.edit_text(WELCOME_TEXT, reply_markup=main_menu())
     await call.answer()
 
