@@ -18,7 +18,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "8726442337:AAHxZ9f5JKBTbP30vwNYXzs0LzZrnT_cNHw"
+BOT_TOKEN = "8726442337:AAGtlsrb1_PLBVmQAbGwjOfsr6ELomMq79o"
 ADMINS = [5539825213, 6107364623]
 
 ADMIN_CONTACTS = [
